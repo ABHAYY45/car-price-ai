@@ -27,7 +27,7 @@ from sklearn.model_selection import train_test_split
 # --------------------------------------------------------------------------- #
 # Keeping paths/settings as constants makes them easy to find and change
 # later (e.g. if you rename the dataset or move it to a different folder).
-DATA_PATH = "data/car_data.csv"
+DATA_PATH = "data/processed_car_data.csv"
 MODEL_PATH = "models/car_price_model.pkl"
 TARGET_COLUMN = "selling_price"
 TEST_SIZE = 0.2          # 20% of data held out for testing
@@ -162,6 +162,7 @@ def save_model(model: RandomForestRegressor, filepath: str) -> None:
     """
     # Make sure the target folder (e.g. "models/") exists before saving
     os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    print(f"[DEBUG] Saving model at: {filepath}") 
     joblib.dump(model, filepath)
     print(f"[INFO] Model saved to '{filepath}'")
  

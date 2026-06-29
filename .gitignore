@@ -4,3 +4,8 @@ __pycache__/
 models/
 .env
 .DS_Store
+
+# ML specific
+data/
+*.log
+.ipynb_checkpoints/

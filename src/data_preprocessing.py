@@ -15,7 +15,7 @@ Pipeline stages:
  
 Author: (generated for Abhay's Car Price Prediction + Recommendation project)
 """
- 
+import os
 import pandas as pd
 import numpy as np
 from datetime import datetime
@@ -375,36 +375,27 @@ def display_summary(df: pd.DataFrame) -> None:
 # 5. MAIN PIPELINE
 # --------------------------------------------------------------------------- #
 def run_pipeline(filepath: str, current_year: int = None) -> pd.DataFrame:
-    """
-    Run the complete load -> clean -> feature-engineer -> report pipeline.
- 
-    Parameters
-    ----------
-    filepath : str
-        Path to the raw CSV file.
-    current_year : int, optional
-        Reference year for computing car_age. Defaults to the current
-        calendar year if not provided.
- 
-    Returns
-    -------
-    pd.DataFrame
-        Final, ML-ready cleaned dataframe.
-    """
     # Stage 1: Load
     raw_df = load_data(filepath)
     print_shape(raw_df, "BEFORE cleaning")
- 
+
     # Stage 2: Clean
     cleaned_df = clean_data(raw_df, current_year=current_year)
- 
+
     # Stage 3: Feature engineer
     final_df = feature_engineer(cleaned_df)
     print_shape(final_df, "AFTER cleaning + feature engineering")
- 
+
     # Stage 4: Report
     display_summary(final_df)
- 
+
+    #Save file
+    output_path = "data/processed_car_data.csv"
+    os.makedirs("data", exist_ok=True)
+    final_df.to_csv(output_path, index=False)
+
+    print(f"[INFO] Processed data saved at: {output_path}")
+
     return final_df
  
  
