@@ -1,7 +1,7 @@
 """
 car_data_cleaning.py
 ---------------------
-Data Cleaning + Feature Engineering pipeline for the CarDekho used-car dataset.
+Data Cleaning + Feature Engineering pipeline for the car_data used-car dataset.
  
 This script ONLY prepares the data for machine learning. It does NOT train
 any model. It is meant to be imported (call `run_pipeline(path)`) or run
@@ -13,12 +13,11 @@ Pipeline stages:
     3. Feature-engineer categorical columns (encoding)
     4. Report shape / summary stats / preview
  
-Author: (generated for Abhay's Car Price Prediction + Recommendation project)
 """
-import os
-import pandas as pd
-import numpy as np
-from datetime import datetime
+import os #file handling
+import pandas as pd #Main data tool
+import numpy as np #Numerical ops
+from datetime import datetime #Used for car age calculation
  
  
 # --------------------------------------------------------------------------- #
@@ -26,7 +25,7 @@ from datetime import datetime
 # --------------------------------------------------------------------------- #
 def load_data(filepath: str) -> pd.DataFrame:
     """
-    Load the CarDekho dataset from a CSV file into a pandas DataFrame.
+    Load the car_data dataset from a CSV file into a pandas DataFrame.
  
     Parameters
     ----------
@@ -64,9 +63,9 @@ def handle_missing_values(df: pd.DataFrame) -> pd.DataFrame:
     pd.DataFrame
         Dataframe with missing values imputed.
     """
-    df = df.copy()
+    df = df.copy() #Avoid modifying original dataframe (important for debugging & safety)
  
-    missing_before = df.isnull().sum()
+    missing_before = df.isnull().sum() #For each column count how many missing values
     if missing_before.sum() == 0:
         print("[INFO] No missing values found.")
         return df
@@ -79,14 +78,14 @@ def handle_missing_values(df: pd.DataFrame) -> pd.DataFrame:
             continue
  
         if pd.api.types.is_numeric_dtype(df[col]):
-            # Median is preferred over mean since it's robust to skew/outliers
+            # Median is preferred over mean since it's robust to skew/outliers. Eg: [1,2,3,1000] => mean = bad but median = 2.5
             median_val = df[col].median()
             df[col] = df[col].fillna(median_val)
         else:
             # For categorical/text columns, fill with the most frequent value
             mode_val = df[col].mode(dropna=True)
             if not mode_val.empty:
-                df[col] = df[col].fillna(mode_val[0])
+                df[col] = df[col].fillna(mode_val[0]) #Replace missing with most common category
  
     return df
  
@@ -105,9 +104,9 @@ def remove_duplicate_rows(df: pd.DataFrame) -> pd.DataFrame:
         Dataframe without duplicate rows.
     """
     df = df.copy()
-    n_duplicates = df.duplicated().sum()
-    print(f"[INFO] Duplicate rows found: {n_duplicates}")
-    df = df.drop_duplicates()
+    n_duplicates = df.duplicated().sum() #Count duplicate rows
+    print(f"[INFO] Duplicate rows found: {n_duplicates}") 
+    df = df.drop_duplicates() #Remove duplicates
     return df
  
  
@@ -132,12 +131,12 @@ def create_car_age(df: pd.DataFrame, current_year: int = None) -> pd.DataFrame:
     if current_year is None:
         current_year = datetime.now().year
  
-    df["car_age"] = current_year - df["year"]
+    df["car_age"] = current_year - df["year"] #ML understands numbers better than raw year => Age has a direct relationship with price
  
     # Defensive check: car_age should never be negative (year can't be in the future)
-    df["car_age"] = df["car_age"].clip(lower=0)
+    df["car_age"] = df["car_age"].clip(lower=0) 
  
-    df = df.drop(columns=["year"])
+    df = df.drop(columns=["year"]) #Remove original column
     return df
  
  
@@ -161,15 +160,15 @@ def _remove_outliers_iqr(df: pd.DataFrame, column: str, multiplier: float = 1.5)
     """
     q1 = df[column].quantile(0.25)
     q3 = df[column].quantile(0.75)
-    iqr = q3 - q1
- 
+    iqr = q3 - q1 #Interuartile range
+  
     lower_bound = q1 - multiplier * iqr
     upper_bound = q3 + multiplier * iqr
  
     # A price/km value can never be negative -> floor the lower bound at 0
     lower_bound = max(lower_bound, 0)
  
-    mask = (df[column] >= lower_bound) & (df[column] <= upper_bound)
+    mask = (df[column] >= lower_bound) & (df[column] <= upper_bound) #Keep only valid rows
     removed = (~mask).sum()
     print(f"[INFO] Outliers removed on '{column}': {removed} "
           f"(valid range ~ [{lower_bound:,.0f}, {upper_bound:,.0f}])")

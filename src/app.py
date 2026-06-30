@@ -1,4 +1,3 @@
-
 """
 app.py
 ------
@@ -210,18 +209,95 @@ def format_currency(amount: float) -> str:
  
  
 # --------------------------------------------------------------------------- #
-# STEP 6: STREAMLIT UI
+# STEP 6: CUSTOM CSS (presentation only -- no logic here)
+# --------------------------------------------------------------------------- #
+def inject_custom_css():
+    """Inject custom CSS for a cleaner, more polished look and feel."""
+    st.markdown(
+        """
+        <style>
+            /* Center and constrain the main content for a polished look */
+            .block-container {
+                padding-top: 2rem;
+                padding-bottom: 3rem;
+                max-width: 850px;
+            }
+ 
+            /* Subtitle under the main title */
+            .app-subtitle {
+                text-align: center;
+                color: #6b7280;
+                font-size: 1.05rem;
+                margin-top: -0.5rem;
+                margin-bottom: 1.5rem;
+            }
+ 
+            /* Section headers with a little extra breathing room */
+            .section-header {
+                font-size: 1.15rem;
+                font-weight: 600;
+                margin-top: 0.5rem;
+                margin-bottom: 0.75rem;
+            }
+ 
+            /* Make the predict button full-width and prominent */
+            div.stButton > button {
+                width: 100%;
+                height: 3rem;
+                font-size: 1.05rem;
+                font-weight: 600;
+                border-radius: 10px;
+            }
+ 
+            /* Highlighted prediction result card */
+            .result-card {
+                background: linear-gradient(135deg, #16a34a 0%, #15803d 100%);
+                color: white;
+                padding: 1.75rem;
+                border-radius: 16px;
+                text-align: center;
+                margin-top: 1rem;
+                box-shadow: 0 4px 14px rgba(22, 163, 74, 0.25);
+            }
+            .result-card .label {
+                font-size: 0.95rem;
+                opacity: 0.9;
+                margin-bottom: 0.25rem;
+            }
+            .result-card .price {
+                font-size: 2.2rem;
+                font-weight: 700;
+                margin: 0;
+            }
+ 
+            /* Disclaimer text */
+            .disclaimer {
+                text-align: center;
+                color: #9ca3af;
+                font-size: 0.82rem;
+                margin-top: 1rem;
+            }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+ 
+ 
+# --------------------------------------------------------------------------- #
+# STEP 7: STREAMLIT UI
 # --------------------------------------------------------------------------- #
 def main():
-    # --- Page setup / basic styling ---
+    # --- Page setup ---
     st.set_page_config(page_title="Car Price Predictor", page_icon="🚗", layout="centered")
+    inject_custom_css()
  
-    st.title("🚗 Used Car Price Predictor")
+    # --- Centered title + subtitle ---
+    st.markdown("<h1 style='text-align:center;'>🚗 Used Car Price Predictor</h1>", unsafe_allow_html=True)
     st.markdown(
-        "Estimate a used car's selling price using a trained "
-        "**RandomForestRegressor** model."
+        "<div class='app-subtitle'>Get an instant price estimate powered by a trained "
+        "Random Forest model 🌳</div>",
+        unsafe_allow_html=True,
     )
-    st.divider()
  
     # --- Load model + reference data (wrapped so the app never crashes silently) ---
     try:
@@ -245,40 +321,41 @@ def main():
         st.warning("⚠️ No fuel/brand one-hot columns detected in the dataset. "
                    "Dropdowns may be incomplete.")
  
-    # --- Input section ---
-    st.subheader("📋 Car Details")
+    # --- Input section, inside a bordered container for visual grouping ---
+    with st.container(border=True):
+        st.markdown("<div class='section-header'>📋 Car Details</div>", unsafe_allow_html=True)
  
-    col1, col2 = st.columns(2)
+        col1, col2 = st.columns(2, gap="large")
  
-    with col1:
-        km_driven = st.number_input(
-            "Kilometers Driven", min_value=0, max_value=2_000_000,
-            value=50000, step=1000,
-        )
-        car_age = st.slider(
-            "Car Age (years)",
-            min_value=0, max_value=max(ranges["car_age_max"], 30),
-            value=min(5, ranges["car_age_max"]),
-        )
-        transmission_label = st.selectbox(
-            "Transmission", options=list(TRANSMISSION_LABELS.values())
-        )
+        with col1:
+            km_driven = st.number_input(
+                "🛣️ Kilometers Driven", min_value=0, max_value=2_000_000,
+                value=50000, step=1000,
+            )
+            car_age = st.slider(
+                "📅 Car Age (years)",
+                min_value=0, max_value=max(ranges["car_age_max"], 30),
+                value=min(5, ranges["car_age_max"]),
+            )
+            transmission_label = st.selectbox(
+                "⚙️ Transmission", options=list(TRANSMISSION_LABELS.values())
+            )
  
-    with col2:
-        owner_label = st.selectbox("Owner", options=list(OWNER_LABELS.values()))
-        fuel = st.selectbox("Fuel Type", options=fuel_options)
-        brand = st.selectbox("Brand", options=brand_options)
+        with col2:
+            owner_label = st.selectbox("👤 Owner", options=list(OWNER_LABELS.values()))
+            fuel = st.selectbox("⛽ Fuel Type", options=fuel_options)
+            brand = st.selectbox("🏷️ Brand", options=brand_options)
  
     # Convert the human-readable dropdown labels back to their numeric codes
     transmission = [k for k, v in TRANSMISSION_LABELS.items() if v == transmission_label][0]
     owner = [k for k, v in OWNER_LABELS.items() if v == owner_label][0]
  
-    st.divider()
+    st.write("")  # small spacer
  
-    # --- Prediction section ---
-    st.subheader("💰 Prediction")
+    # --- Prediction trigger ---
+    predict_clicked = st.button("💰 Predict Price", type="primary")
  
-    if st.button("Predict Price", type="primary"):
+    if predict_clicked:
         # Show warnings for unrealistic inputs, but still proceed with prediction
         warnings = validate_inputs(km_driven, car_age, ranges)
         for warning in warnings:
@@ -295,7 +372,25 @@ def main():
                 brand=brand,
             )
             predicted_price = predict_price(model, input_df)
-            st.success(f"### Estimated Selling Price: {format_currency(predicted_price)}")
+ 
+            # --- Highlighted result card ---
+            st.markdown(
+                f"""
+                <div class="result-card">
+                    <div class="label">Estimated Selling Price</div>
+                    <p class="price">{format_currency(predicted_price)}</p>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+ 
+            # --- Disclaimer ---
+            st.markdown(
+                "<div class='disclaimer'>⚠️ This is an estimate based on historical data "
+                "and may not reflect the actual market price.</div>",
+                unsafe_allow_html=True,
+            )
+ 
         except Exception as e:
             # Catch-all so the app degrades gracefully instead of crashing
             st.error(f"❌ Something went wrong while predicting: {e}")
@@ -303,3 +398,4 @@ def main():
  
 if __name__ == "__main__":
     main()
+ 
