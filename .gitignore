@@ -1,11 +1,9 @@
 venv/
 __pycache__/
 *.pyc
-models/
 .env
 .DS_Store
 
 # ML specific
-data/
 *.log
 .ipynb_checkpoints/

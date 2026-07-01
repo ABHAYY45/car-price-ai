@@ -399,7 +399,6 @@ def run_pipeline(filepath: str, current_year: int = None) -> pd.DataFrame:
  
  
 if __name__ == "__main__":
-    # Change this path if your CSV lives elsewhere
-    DATA_PATH = "data/car_data.csv"
+
  
     final_dataframe = run_pipeline(DATA_PATH)

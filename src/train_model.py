@@ -189,8 +189,7 @@ def main():
     metrics = evaluate_model(model, X_test, y_test)
     print_metrics(metrics)
  
-    # 6. Save the trained model for later use (e.g. in a prediction API/app)
-    save_model(model, MODEL_PATH)
+
  
  
 if __name__ == "__main__":
