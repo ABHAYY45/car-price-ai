@@ -16,6 +16,7 @@ Output : models/car_price_model.pkl
 """
 
 import os
+import sys
 
 import joblib
 import numpy as np
@@ -24,6 +25,12 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import LinearRegression
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import train_test_split
+
+try:
+    from xgboost import XGBRegressor
+    XGBOOST_AVAILABLE = True
+except ImportError:
+    XGBOOST_AVAILABLE = False
 
 # --------------------------------------------------------------------------- #
 # CONFIG
@@ -109,6 +116,39 @@ def train_random_forest(X_train, y_train) -> RandomForestRegressor:
     return model
 
 
+def train_xgboost(X_train, y_train) -> "XGBRegressor":
+    """
+    Fit an XGBRegressor using well-tested default parameters.
+
+    n_estimators=300    -> more trees than RF default; XGBoost uses shallow
+                          trees so more rounds are needed to capture complexity.
+    learning_rate=0.05  -> small step size makes each tree contribute less,
+                          which reduces overfitting and often beats larger LR.
+    max_depth=6         -> standard starting depth; deep enough for interactions,
+                          shallow enough to avoid overfitting on tabular data.
+    subsample=0.8       -> each tree sees 80% of rows (row sampling) — adds
+                          randomness that reduces variance.
+    colsample_bytree=0.8-> each tree sees 80% of features (column sampling) —
+                          similar benefit to RF's feature subsampling.
+    n_jobs=-1           -> use all available CPU cores.
+    verbosity=0         -> suppress XGBoost's internal progress output so logs
+                          stay consistent with the other models.
+    """
+    model = XGBRegressor(
+        n_estimators=300,
+        learning_rate=0.05,
+        max_depth=6,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        random_state=RANDOM_STATE,
+        n_jobs=-1,
+        verbosity=0,
+    )
+    model.fit(X_train, y_train)
+    print("[INFO] XGBRegressor trained.")
+    return model
+
+
 # --------------------------------------------------------------------------- #
 # STEP 5 — EVALUATE
 # --------------------------------------------------------------------------- #
@@ -175,13 +215,21 @@ def main():
     # 3. Split
     X_train, X_test, y_train, y_test = split(X, y, TEST_SIZE, RANDOM_STATE)
 
-    # 4. Train both models
+    # 4. Train models
     lr = train_linear(X_train, y_train)
     rf = train_random_forest(X_train, y_train)
 
-    # 5. Evaluate both
-    lr_metrics = evaluate(lr, X_test, y_test)
-    rf_metrics = evaluate(rf, X_test, y_test)
+    if not XGBOOST_AVAILABLE:
+        print("\n[WARNING] XGBoost not installed — skipping.")
+        print("          Install it with: pip install xgboost")
+        xgb = None
+    else:
+        xgb = train_xgboost(X_train, y_train)
+
+    # 5. Evaluate
+    lr_metrics  = evaluate(lr, X_test, y_test)
+    rf_metrics  = evaluate(rf, X_test, y_test)
+    xgb_metrics = evaluate(xgb, X_test, y_test) if xgb else None
 
     # 6. Print results
     print("\n" + "=" * 50)
@@ -189,12 +237,17 @@ def main():
     print("=" * 50)
     print_results("Linear Regression", lr_metrics)
     print_results("Random Forest",     rf_metrics)
+    if xgb_metrics:
+        print_results("XGBoost",       xgb_metrics)
 
-    # 7. Pick winner
+    # 7. Pick winner (exclude XGBoost entry if it wasn't trained)
     models = {
-        "Linear Regression": {"model": lr, "metrics": lr_metrics},
-        "Random Forest":     {"model": rf, "metrics": rf_metrics},
+        "Linear Regression": {"model": lr,  "metrics": lr_metrics},
+        "Random Forest":     {"model": rf,  "metrics": rf_metrics},
     }
+    if xgb and xgb_metrics:
+        models["XGBoost"] = {"model": xgb, "metrics": xgb_metrics}
+
     winner_name, winner_model = best_model(models)
 
     print("\n" + "=" * 50)
