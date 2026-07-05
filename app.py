@@ -41,6 +41,12 @@ import pandas as pd
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
+try:
+    import shap
+    SHAP_AVAILABLE = True
+except ImportError:
+    SHAP_AVAILABLE = False
+
 # --------------------------------------------------------------------------- #
 # LOGGING
 # --------------------------------------------------------------------------- #
@@ -174,9 +180,11 @@ class PredictionOutput(BaseModel):
 # MODEL STORE
 # --------------------------------------------------------------------------- #
 class ModelStore:
-    """Holds the loaded model and its expected feature columns (loaded once at startup)."""
+    """Holds the loaded model, explainer, and feature columns (all loaded once at startup)."""
     model           = None
-    feature_columns = []   # populated from model.feature_names_in_ at startup
+    feature_columns = []
+    explainer       = None   # shap.TreeExplainer, initialized once at startup
+    shap_base_value = None   # scalar expected value (model's average prediction)
 
 
 # --------------------------------------------------------------------------- #
@@ -220,11 +228,41 @@ async def lifespan(app: FastAPI):
 
     log.info("FEATURE_COLUMNS validated against model — no missing columns.")
     log.info(f"Active columns: {ModelStore.feature_columns}")
+
+    # --- Initialize SHAP explainer once (reused across all requests) ---
+    if SHAP_AVAILABLE:
+        try:
+            # TreeExplainer is exact and fast for tree-based models
+            # (RandomForest, XGBoost, LightGBM, CatBoost, ExtraTrees).
+            # It computes SHAP values analytically without sampling,
+            # making it safe to call per-request without performance risk.
+            ModelStore.explainer = shap.TreeExplainer(ModelStore.model)
+
+            # expected_value is the model's average prediction across training
+            # data (the baseline before any feature contributions are added).
+            # For regression it is a scalar or a 1-element array — normalize to float.
+            ev = ModelStore.explainer.expected_value
+            ModelStore.shap_base_value = float(ev[0] if hasattr(ev, "__len__") else ev)
+
+            log.info(f"SHAP TreeExplainer initialized. "
+                     f"Base value (expected prediction): {ModelStore.shap_base_value:,.0f}")
+        except Exception as e:
+            # Non-tree models (e.g. LinearRegression) are not supported by
+            # TreeExplainer. Log clearly — /predict still works fine.
+            log.warning(f"SHAP TreeExplainer could not be initialized: {e}")
+            log.warning("/predict-with-explanation will return 503 for this model type.")
+            ModelStore.explainer = None
+    else:
+        log.warning("shap not installed — /predict-with-explanation unavailable.")
+        log.warning("Install with: pip install shap")
+
     yield
     # --- Shutdown ---
     ModelStore.model           = None
     ModelStore.feature_columns = []
-    log.info("Model unloaded.")
+    ModelStore.explainer       = None
+    ModelStore.shap_base_value = None
+    log.info("Model and explainer unloaded.")
 
 
 # --------------------------------------------------------------------------- #
@@ -380,3 +418,83 @@ def predict(car: CarInput):
     except Exception as e:
         log.error(f"Prediction failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Prediction failed: {str(e)}")
+
+
+# --------------------------------------------------------------------------- #
+# EXPLANATION SCHEMA + ENDPOINT
+# --------------------------------------------------------------------------- #
+class ExplanationOutput(BaseModel):
+    predicted_price: float = Field(..., description="Estimated selling price in INR")
+    base_value:      float = Field(..., description="Model's average prediction (SHAP baseline)")
+    shap_values:     dict  = Field(..., description="Feature name -> SHAP contribution (float)")
+
+
+@app.post("/predict-with-explanation", response_model=ExplanationOutput, tags=["Explanation"])
+def predict_with_explanation(car: CarInput):
+    """
+    Predict the selling price AND return a SHAP explanation.
+
+    Response includes:
+        predicted_price : the model's price estimate (INR)
+        base_value      : the model's average prediction across training data.
+                          This is the starting point before any feature
+                          contributions push the prediction up or down.
+        shap_values     : dict mapping each feature name to its contribution.
+                          Positive  -> pushed the price UP from base_value.
+                          Negative  -> pushed the price DOWN from base_value.
+                          Sum check : base_value + sum(shap_values) ≈ predicted_price
+
+    Requires a tree-based model (RandomForest, XGBoost, etc.).
+    Returns 503 if SHAP is unavailable or the model type is unsupported.
+    """
+    if ModelStore.model is None:
+        raise HTTPException(status_code=503, detail="Model is not loaded.")
+
+    if ModelStore.explainer is None:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "SHAP explainer is not available. "
+                "Either shap is not installed (pip install shap) or "
+                "the loaded model type is not supported by TreeExplainer."
+            ),
+        )
+
+    try:
+        input_df = preprocess(car)
+
+        # --- Predict ---
+        price = float(round(ModelStore.model.predict(input_df)[0], 2))
+
+        # --- SHAP values ---
+        # shap_values returns shape (1, n_features) for single-row regression.
+        # We flatten to a 1-D array of length n_features.
+        raw_shap = ModelStore.explainer.shap_values(input_df)
+        sv_array = np.array(raw_shap).flatten()   # (16,) — one value per feature
+
+        # Build feature -> contribution dict.
+        # All values are cast to plain Python float for JSON serialisation
+        # (numpy.float32/64 is not JSON-serialisable by default).
+        feature_names = ModelStore.feature_columns
+        shap_dict = {
+            feature_names[i]: round(float(sv_array[i]), 4)
+            for i in range(len(feature_names))
+        }
+
+        log.info(
+            f"Explanation | price=₹{price:,.0f} | "
+            f"base=₹{ModelStore.shap_base_value:,.0f} | "
+            f"top feature: {max(shap_dict, key=lambda k: abs(shap_dict[k]))}"
+        )
+
+        return ExplanationOutput(
+            predicted_price = price,
+            base_value      = ModelStore.shap_base_value,
+            shap_values     = shap_dict,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error(f"Explanation failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Explanation failed: {str(e)}")

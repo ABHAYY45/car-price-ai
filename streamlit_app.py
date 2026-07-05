@@ -10,13 +10,15 @@ The FastAPI backend must be running separately on port 8000:
     uvicorn app:app --reload
 """
 
+import matplotlib.pyplot as plt
 import requests
 import streamlit as st
 
 # --------------------------------------------------------------------------- #
 # CONFIG
 # --------------------------------------------------------------------------- #
-API_URL     = "http://127.0.0.1:8000/predict"
+API_URL         = "http://127.0.0.1:8000/predict"
+EXPLANATION_URL = "http://127.0.0.1:8000/predict-with-explanation"
 API_TIMEOUT = 10  # seconds before giving up on the request
 
 # --------------------------------------------------------------------------- #
@@ -128,8 +130,68 @@ def call_predict_api(payload: dict) -> dict:
     Raises requests.RequestException on any network or HTTP error.
     """
     response = requests.post(API_URL, json=payload, timeout=API_TIMEOUT)
-    response.raise_for_status()  # raises HTTPError for 4xx / 5xx responses
+    response.raise_for_status()
     return response.json()
+
+
+def call_explanation_api(payload: dict) -> dict:
+    """
+    Send the payload to the FastAPI /predict-with-explanation endpoint.
+    Returns predicted_price, base_value, and shap_values dict.
+    """
+    response = requests.post(EXPLANATION_URL, json=payload, timeout=API_TIMEOUT)
+    response.raise_for_status()
+    return response.json()
+
+
+def draw_shap_chart(shap_values: dict, top_n: int = 8) -> plt.Figure:
+    """
+    Draw a horizontal bar chart of the top N SHAP contributions.
+
+    Positive values (green) pushed the price UP from the baseline.
+    Negative values (red)   pushed the price DOWN from the baseline.
+    Features are sorted by absolute contribution so the most impactful
+    ones appear at the top.
+    """
+    # Sort by absolute value, take top N
+    sorted_items = sorted(shap_values.items(), key=lambda x: abs(x[1]), reverse=True)
+    top_items    = sorted_items[:top_n]
+
+    # Reverse so the highest bar appears at the top of the chart
+    features = [item[0] for item in reversed(top_items)]
+    values   = [item[1] for item in reversed(top_items)]
+    colors   = ["#16a34a" if v >= 0 else "#dc2626" for v in values]
+
+    fig, ax = plt.subplots(figsize=(7, max(3, len(features) * 0.55)))
+    fig.patch.set_facecolor("#0f1117")   # match Streamlit dark background
+    ax.set_facecolor("#0f1117")
+
+    bars = ax.barh(features, values, color=colors, height=0.55)
+
+    # Value labels on each bar
+    for bar, val in zip(bars, values):
+        x_pos  = bar.get_width()
+        offset = max(abs(x_pos) * 0.02, 200)
+        ha     = "left" if x_pos >= 0 else "right"
+        ax.text(
+            x_pos + (offset if x_pos >= 0 else -offset),
+            bar.get_y() + bar.get_height() / 2,
+            f"{'+'if val>=0 else ''}₹{val:,.0f}",
+            va="center", ha=ha,
+            fontsize=8.5, color="white",
+        )
+
+    ax.axvline(0, color="#6b7280", linewidth=0.8, linestyle="--")
+    ax.set_xlabel("Contribution to Price (₹)", color="#9ca3af", fontsize=9)
+    ax.tick_params(colors="#d1d5db", labelsize=9)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_color("#374151")
+    ax.spines["bottom"].set_color("#374151")
+    ax.xaxis.label.set_color("#9ca3af")
+
+    plt.tight_layout()
+    return fig
 
 
 # --------------------------------------------------------------------------- #
@@ -222,28 +284,60 @@ with st.container(border=True):
         )
 
 # --------------------------------------------------------------------------- #
-# PREDICT BUTTON + RESULT
+# BUTTONS
 # --------------------------------------------------------------------------- #
-predict_clicked = st.button("🔍 Predict Price", type="primary")
+btn_col1, btn_col2 = st.columns(2, gap="medium")
+with btn_col1:
+    predict_clicked = st.button("🔍 Predict Price", type="primary")
+with btn_col2:
+    explain_clicked = st.button("🧠 Explain Prediction", type="secondary")
+
+
+# --------------------------------------------------------------------------- #
+# SHARED PAYLOAD
+# --------------------------------------------------------------------------- #
+payload = {
+    "vehicle_age":       int(vehicle_age),
+    "km_driven":         int(km_driven),
+    "mileage":           float(mileage),
+    "engine":            int(engine),
+    "max_power":         float(max_power),
+    "seats":             int(seats),
+    "fuel_type":         fuel_type,
+    "seller_type":       seller_type,
+    "transmission_type": transmission_type,
+}
+
+
+# --------------------------------------------------------------------------- #
+# PREDICT  (existing behaviour, unchanged)
+# --------------------------------------------------------------------------- #
+def _show_api_error(e: Exception) -> None:
+    """Centralised error display used by both buttons."""
+    if isinstance(e, requests.exceptions.ConnectionError):
+        st.error(
+            "❌ Could not connect to the prediction API.\n\n"
+            "Make sure the FastAPI backend is running:\n"
+            "```\nuvicorn app:app --reload\n```"
+        )
+    elif isinstance(e, requests.exceptions.Timeout):
+        st.error(f"❌ The API did not respond within {API_TIMEOUT} seconds. Please try again.")
+    elif isinstance(e, requests.exceptions.HTTPError):
+        status = e.response.status_code if e.response is not None else "unknown"
+        try:
+            detail = e.response.json().get("detail", str(e))
+        except Exception:
+            detail = str(e)
+        st.error(f"❌ API returned an error (HTTP {status}):\n\n{detail}")
+    else:
+        st.error(f"❌ Unexpected error: {e}")
+
 
 if predict_clicked:
-    payload = {
-        "vehicle_age":       int(vehicle_age),
-        "km_driven":         int(km_driven),
-        "mileage":           float(mileage),
-        "engine":            int(engine),
-        "max_power":         float(max_power),
-        "seats":             int(seats),
-        "fuel_type":         fuel_type,
-        "seller_type":       seller_type,
-        "transmission_type": transmission_type,
-    }
-
     with st.spinner("Calculating price estimate..."):
         try:
             result = call_predict_api(payload)
             price  = result["predicted_price"]
-
             st.markdown(f"""
             <div class="result-card">
                 <div class="result-label">Estimated Selling Price</div>
@@ -254,32 +348,74 @@ if predict_clicked:
                 </div>
             </div>
             """, unsafe_allow_html=True)
-
-        except requests.exceptions.ConnectionError:
-            st.error(
-                "❌ Could not connect to the prediction API.\n\n"
-                "Make sure the FastAPI backend is running:\n"
-                "```\nuvicorn app:app --reload\n```"
-            )
-        except requests.exceptions.Timeout:
-            st.error(
-                f"❌ The API did not respond within {API_TIMEOUT} seconds. "
-                "Please try again."
-            )
-        except requests.exceptions.HTTPError as e:
-            status = e.response.status_code if e.response is not None else "unknown"
-            try:
-                detail = e.response.json().get("detail", str(e))
-            except Exception:
-                detail = str(e)
-            st.error(f"❌ API returned an error (HTTP {status}):\n\n{detail}")
-        except (KeyError, ValueError):
-            st.error(
-                "❌ Unexpected response from API. "
-                "The response did not contain 'predicted_price'."
-            )
         except Exception as e:
-            st.error(f"❌ Unexpected error: {e}")
+            _show_api_error(e)
+
+
+# --------------------------------------------------------------------------- #
+# EXPLAIN  (new)
+# --------------------------------------------------------------------------- #
+if explain_clicked:
+    with st.spinner("Running SHAP explanation..."):
+        try:
+            result = call_explanation_api(payload)
+            price      = result["predicted_price"]
+            base_value = result["base_value"]
+            shap_vals  = result["shap_values"]
+
+            # --- Price card ---
+            st.markdown(f"""
+            <div class="result-card">
+                <div class="result-label">Estimated Selling Price</div>
+                <p class="result-price">{format_inr(price)}</p>
+                <div class="result-note">
+                    Baseline (average prediction): {format_inr(base_value)}
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            st.write("")
+
+            # --- Top contributors summary ---
+            sorted_shap = sorted(shap_vals.items(), key=lambda x: x[1], reverse=True)
+            positive    = [(f, v) for f, v in sorted_shap if v > 0]
+            negative    = [(f, v) for f, v in sorted_shap if v < 0]
+
+            with st.container(border=True):
+                st.markdown("#### 📊 What's driving this price?")
+                st.caption(
+                    f"Starting from a baseline of **{format_inr(base_value)}** "
+                    f"(model's average prediction), these features pushed the "
+                    f"estimate to **{format_inr(price)}**."
+                )
+
+                col_pos, col_neg = st.columns(2, gap="large")
+
+                with col_pos:
+                    st.markdown("**🟢 Pushed price UP**")
+                    for feat, val in positive[:5]:
+                        label = feat.replace("_", " ").title()
+                        st.markdown(f"- `{label}` &nbsp; **+{format_inr(val)}**",
+                                    unsafe_allow_html=True)
+
+                with col_neg:
+                    st.markdown("**🔴 Pushed price DOWN**")
+                    for feat, val in negative[:5]:
+                        label = feat.replace("_", " ").title()
+                        st.markdown(f"- `{label}` &nbsp; **{format_inr(val)}**",
+                                    unsafe_allow_html=True)
+
+            # --- SHAP bar chart ---
+            st.write("")
+            st.markdown("#### 🔬 Feature Contribution Chart")
+            st.caption("Top 8 features by absolute SHAP contribution. "
+                       "Green = raised the price, Red = lowered the price.")
+            fig = draw_shap_chart(shap_vals, top_n=8)
+            st.pyplot(fig, use_container_width=True)
+            plt.close(fig)
+
+        except Exception as e:
+            _show_api_error(e)
 
 # --------------------------------------------------------------------------- #
 # FOOTER
