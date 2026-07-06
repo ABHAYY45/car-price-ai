@@ -146,52 +146,95 @@ def call_explanation_api(payload: dict) -> dict:
 
 def draw_shap_chart(shap_values: dict, top_n: int = 8) -> plt.Figure:
     """
-    Draw a horizontal bar chart of the top N SHAP contributions.
+    Horizontal bar chart of the top N SHAP feature contributions.
+    Green bars = pushed price UP, red bars = pushed price DOWN.
 
-    Positive values (green) pushed the price UP from the baseline.
-    Negative values (red)   pushed the price DOWN from the baseline.
-    Features are sorted by absolute contribution so the most impactful
-    ones appear at the top.
+    KEY FIX vs the previous version:
+    Value labels are now placed using `ax.annotate(..., textcoords="offset points")`
+    instead of a data-unit offset (`pad = x_range * 0.03`). A data-unit offset only
+    "looks right" when all bars are similar in magnitude — as soon as one feature's
+    contribution dwarfs the others, that same percentage becomes a tiny pixel gap
+    for the small bars (causing labels to sit on top of bars / collide with the
+    zero-line / overlap each other) and a huge, wasted gap for the big bar.
+    An offset in *points* is a constant number of pixels regardless of the data
+    range, so labels never collide with their own bar or with each other.
+
+    We also give the y-axis extra head/foot-room and let matplotlib's
+    `constrained_layout` manage spacing instead of a hand-tuned
+    `subplots_adjust`, which was fragile as the number of bars / feature-name
+    lengths changed.
     """
-    # Sort by absolute value, take top N
+    # Sort by absolute value descending, take top N, then reverse so the
+    # most impactful feature renders at the top of the chart (barh is
+    # bottom-to-top by default, so we feed items in ascending order).
     sorted_items = sorted(shap_values.items(), key=lambda x: abs(x[1]), reverse=True)
-    top_items    = sorted_items[:top_n]
+    top_items    = list(reversed(sorted_items[:top_n]))
 
-    # Reverse so the highest bar appears at the top of the chart
-    features = [item[0] for item in reversed(top_items)]
-    values   = [item[1] for item in reversed(top_items)]
+    # Replace underscores with spaces so "max_power" reads "max power"
+    features = [item[0].replace("_", " ") for item in top_items]
+    values   = [item[1] for item in top_items]
+    n        = len(features)
     colors   = ["#16a34a" if v >= 0 else "#dc2626" for v in values]
 
-    fig, ax = plt.subplots(figsize=(7, max(3, len(features) * 0.55)))
-    fig.patch.set_facecolor("#0f1117")   # match Streamlit dark background
+    # --- Dynamic figure size ---
+    row_height  = 0.75
+    fig_height  = max(4.5, n * row_height + 1.4)
+    fig_width   = 9.0
+    fig, ax = plt.subplots(
+        figsize=(fig_width, fig_height),
+        constrained_layout=True,  # lets matplotlib manage margins automatically
+    )
+    fig.patch.set_facecolor("#0f1117")
     ax.set_facecolor("#0f1117")
 
-    bars = ax.barh(features, values, color=colors, height=0.55)
+    # Integer y-positions instead of string labels avoids matplotlib's
+    # automatic label-to-bar mapping, which can cause vertical overlap.
+    bars = ax.barh(range(n), values, color=colors, height=0.55, zorder=2)
 
-    # Value labels on each bar
+    # --- X-axis limits: generous, symmetric-ish padding around the data ---
+    x_min = min(values + [0])
+    x_max = max(values + [0])
+    span  = (x_max - x_min) or max(abs(x_max), 1)
+    margin = span * 0.28
+    ax.set_xlim(x_min - margin, x_max + margin)
+
+    # --- Value labels: fixed pixel offset from the bar tip, so they never
+    #     collide with the bar itself or with neighbouring labels, no matter
+    #     how the bar magnitudes compare to each other. ---
     for bar, val in zip(bars, values):
-        x_pos  = bar.get_width()
-        offset = max(abs(x_pos) * 0.02, 200)
-        ha     = "left" if x_pos >= 0 else "right"
-        ax.text(
-            x_pos + (offset if x_pos >= 0 else -offset),
-            bar.get_y() + bar.get_height() / 2,
-            f"{'+'if val>=0 else ''}₹{val:,.0f}",
+        width = bar.get_width()
+        if val >= 0:
+            label, ha, dx = f"+₹{val:,.0f}", "left", 6
+        else:
+            label, ha, dx = f"₹{val:,.0f}", "right", -6
+        ax.annotate(
+            label,
+            xy=(width, bar.get_y() + bar.get_height() / 2),
+            xytext=(dx, 0),
+            textcoords="offset points",
             va="center", ha=ha,
-            fontsize=8.5, color="white",
+            fontsize=8.5, color="white", fontweight="500",
+            zorder=3, clip_on=False,
         )
 
-    ax.axvline(0, color="#6b7280", linewidth=0.8, linestyle="--")
+    # --- Y-axis: feature name tick labels, with head/foot-room so the
+    #     first and last bars' labels never bump into the axes edge. ---
+    ax.set_yticks(range(n))
+    ax.set_yticklabels(features, fontsize=9.5, color="#d1d5db")
+    ax.set_ylim(-0.7, n - 0.3)
+
+    ax.axvline(0, color="#6b7280", linewidth=0.8, linestyle="--", zorder=1)
     ax.set_xlabel("Contribution to Price (₹)", color="#9ca3af", fontsize=9)
-    ax.tick_params(colors="#d1d5db", labelsize=9)
+    ax.tick_params(axis="x", colors="#6b7280", labelsize=8)
+    ax.tick_params(axis="y", length=0)        # hide y-axis tick marks (cosmetic)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
-    ax.spines["left"].set_color("#374151")
+    ax.spines["left"].set_visible(False)
     ax.spines["bottom"].set_color("#374151")
-    ax.xaxis.label.set_color("#9ca3af")
+    ax.grid(axis="x", color="#1f2937", linewidth=0.6, zorder=0)
 
-    plt.tight_layout()
     return fig
+
 
 
 # --------------------------------------------------------------------------- #
