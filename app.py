@@ -373,8 +373,8 @@ def preprocess(raw: CarInput) -> pd.DataFrame:
 # --------------------------------------------------------------------------- #
 @app.get("/", tags=["Health"])
 def root():
-    """Health check — confirms the API is running."""
-    return {"status": "ok", "message": "Car Price Prediction API is running."}
+    """Health check — confirms the API is running. Used by Render for health checks."""
+    return {"status": "ok", "message": "API is running"}
 
 
 @app.get("/health", tags=["Health"])
@@ -498,3 +498,13 @@ def predict_with_explanation(car: CarInput):
     except Exception as e:
         log.error(f"Explanation failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Explanation failed: {str(e)}")
+
+
+# --------------------------------------------------------------------------- #
+# ENTRYPOINT (for Render / production)
+# --------------------------------------------------------------------------- #
+if __name__ == "__main__":
+    import uvicorn
+
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("app:app", host="0.0.0.0", port=port)

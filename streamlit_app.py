@@ -6,9 +6,15 @@ Streamlit frontend for the Car Price Prediction FastAPI backend.
 Run from the project root:
     streamlit run streamlit_app.py
 
-The FastAPI backend must be running separately on port 8000:
+The FastAPI backend must be running separately:
     uvicorn app:app --reload
+
+To point this app at a deployed backend instead of localhost, set the
+BASE_URL environment variable, e.g.:
+    export BASE_URL=https://your-fastapi-service.onrender.com
 """
+
+import os
 
 import matplotlib.pyplot as plt
 import requests
@@ -17,8 +23,9 @@ import streamlit as st
 # --------------------------------------------------------------------------- #
 # CONFIG
 # --------------------------------------------------------------------------- #
-API_URL         = "http://127.0.0.1:8000/predict"
-EXPLANATION_URL = "http://127.0.0.1:8000/predict-with-explanation"
+# Switch between local and deployed backend by setting the BASE_URL
+# environment variable — no code changes needed.
+BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
 API_TIMEOUT = 10  # seconds before giving up on the request
 
 # --------------------------------------------------------------------------- #
@@ -28,6 +35,7 @@ st.set_page_config(
     page_title="Car Price Predictor",
     page_icon="🚗",
     layout="centered",
+    initial_sidebar_state="collapsed",
 )
 
 # --------------------------------------------------------------------------- #
@@ -35,7 +43,13 @@ st.set_page_config(
 # --------------------------------------------------------------------------- #
 st.markdown("""
 <style>
-    .block-container { max-width: 860px; padding-top: 2rem; padding-bottom: 3rem; }
+    .block-container {
+        max-width: 900px;
+        padding-top: 2rem;
+        padding-bottom: 3rem;
+        padding-left: 1.5rem;
+        padding-right: 1.5rem;
+    }
 
     .app-subtitle {
         text-align: center;
@@ -93,6 +107,34 @@ st.markdown("""
         margin-top: 0.5rem;
     }
     .divider { margin: 1.5rem 0; border-top: 1px solid #e5e7eb; }
+
+    /* Make st.metric look good on wide/web layouts */
+    div[data-testid="stMetric"] {
+        background-color: #f0fdf4;
+        border: 1px solid #bbf7d0;
+        border-radius: 14px;
+        padding: 1.2rem 1rem;
+        text-align: center;
+    }
+    div[data-testid="stMetricLabel"] {
+        justify-content: center;
+        font-size: 0.95rem;
+        color: #166534;
+    }
+    div[data-testid="stMetricValue"] {
+        font-size: 2.2rem;
+        font-weight: 800;
+        color: #15803d;
+    }
+    div[data-testid="stMetricDelta"] {
+        justify-content: center;
+    }
+
+    /* Responsive tweak for smaller / mobile web widths */
+    @media (max-width: 640px) {
+        div[data-testid="stMetricValue"] { font-size: 1.7rem; }
+        .result-card .result-price { font-size: 2.1rem; }
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -124,14 +166,30 @@ def format_inr(amount: float) -> str:
     return "₹" + ",".join(parts) + "," + last3
 
 
-def call_predict_api(payload: dict) -> dict:
+def call_api(endpoint: str, payload: dict) -> dict:
     """
-    Send the payload to the FastAPI /predict endpoint.
-    Raises requests.RequestException on any network or HTTP error.
+    Central helper for all FastAPI backend calls.
+
+    Args:
+        endpoint: API path, e.g. "/predict" or "/predict-with-explanation"
+        payload: JSON-serializable request body
+
+    Returns:
+        Parsed JSON response as a dict.
+
+    Raises:
+        requests.exceptions.RequestException: on network/connection/timeout errors.
+        requests.exceptions.HTTPError: if the API returns a non-2xx status code.
     """
-    response = requests.post(API_URL, json=payload, timeout=API_TIMEOUT)
+    url = f"{BASE_URL.rstrip('/')}/{endpoint.lstrip('/')}"
+    response = requests.post(url, json=payload, timeout=API_TIMEOUT)
     response.raise_for_status()
     return response.json()
+
+
+def call_predict_api(payload: dict) -> dict:
+    """Send the payload to the FastAPI /predict endpoint."""
+    return call_api("/predict", payload)
 
 
 def call_explanation_api(payload: dict) -> dict:
@@ -139,9 +197,7 @@ def call_explanation_api(payload: dict) -> dict:
     Send the payload to the FastAPI /predict-with-explanation endpoint.
     Returns predicted_price, base_value, and shap_values dict.
     """
-    response = requests.post(EXPLANATION_URL, json=payload, timeout=API_TIMEOUT)
-    response.raise_for_status()
-    return response.json()
+    return call_api("/predict-with-explanation", payload)
 
 
 def draw_shap_chart(shap_values: dict, top_n: int = 8) -> plt.Figure:
@@ -238,20 +294,25 @@ def draw_shap_chart(shap_values: dict, top_n: int = 8) -> plt.Figure:
 
 
 # --------------------------------------------------------------------------- #
-# UI
+# HEADER / TITLE / DESCRIPTION
 # --------------------------------------------------------------------------- #
-st.markdown("<h1 style='text-align:center;'>🚗 Car Price Predictor</h1>",
+st.markdown("<h1 style='text-align:center; margin-bottom:0.2rem;'>🚗 Car Price Predictor</h1>",
             unsafe_allow_html=True)
-st.markdown("<div class='app-subtitle'>Enter the car details below to get an "
-            "instant AI-powered price estimate</div>",
-            unsafe_allow_html=True)
+st.markdown(
+    "<div class='app-subtitle'>"
+    "Get an instant, AI-powered resale price estimate for a used car. "
+    "Fill in the vehicle details below, then predict the price or see "
+    "exactly which factors are driving the estimate."
+    "</div>",
+    unsafe_allow_html=True,
+)
 
 # --------------------------------------------------------------------------- #
-# INPUT FORM
+# SECTION: CAR DETAILS
 # --------------------------------------------------------------------------- #
+st.subheader("📋 Car Details")
+
 with st.container(border=True):
-    st.markdown("#### 📋 Car Details")
-
     # Row 1 — Age and Kilometres
     col1, col2 = st.columns(2, gap="large")
     with col1:
@@ -327,8 +388,10 @@ with st.container(border=True):
         )
 
 # --------------------------------------------------------------------------- #
-# BUTTONS
+# SECTION: ACTIONS
 # --------------------------------------------------------------------------- #
+st.subheader("🚀 Get Your Estimate")
+
 btn_col1, btn_col2 = st.columns(2, gap="medium")
 with btn_col1:
     predict_clicked = st.button("🔍 Predict Price", type="primary")
@@ -359,7 +422,7 @@ def _show_api_error(e: Exception) -> None:
     """Centralised error display used by both buttons."""
     if isinstance(e, requests.exceptions.ConnectionError):
         st.error(
-            "❌ Could not connect to the prediction API.\n\n"
+            f"❌ Could not connect to the prediction API at {BASE_URL}.\n\n"
             "Make sure the FastAPI backend is running:\n"
             "```\nuvicorn app:app --reload\n```"
         )
@@ -381,16 +444,28 @@ if predict_clicked:
         try:
             result = call_predict_api(payload)
             price  = result["predicted_price"]
-            st.markdown(f"""
-            <div class="result-card">
-                <div class="result-label">Estimated Selling Price</div>
-                <p class="result-price">{format_inr(price)}</p>
-                <div class="result-note">
-                    Based on current market data · Likely range:
-                    {format_inr(price * 0.88)} – {format_inr(price * 1.12)}
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+
+            st.subheader("💰 Prediction Result")
+
+            metric_col, range_col1, range_col2 = st.columns(3, gap="medium")
+            with metric_col:
+                st.metric(
+                    label="Estimated Selling Price",
+                    value=format_inr(price),
+                )
+            with range_col1:
+                st.metric(
+                    label="Likely Low",
+                    value=format_inr(price * 0.88),
+                )
+            with range_col2:
+                st.metric(
+                    label="Likely High",
+                    value=format_inr(price * 1.12),
+                )
+
+            st.caption("Estimate based on current market data. "
+                       "Actual selling price may vary.")
         except Exception as e:
             _show_api_error(e)
 
@@ -406,16 +481,21 @@ if explain_clicked:
             base_value = result["base_value"]
             shap_vals  = result["shap_values"]
 
-            # --- Price card ---
-            st.markdown(f"""
-            <div class="result-card">
-                <div class="result-label">Estimated Selling Price</div>
-                <p class="result-price">{format_inr(price)}</p>
-                <div class="result-note">
-                    Baseline (average prediction): {format_inr(base_value)}
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+            st.subheader("💰 Prediction Result")
+
+            price_col, base_col = st.columns(2, gap="medium")
+            with price_col:
+                st.metric(
+                    label="Estimated Selling Price",
+                    value=format_inr(price),
+                    delta=format_inr(price - base_value),
+                    help="Delta shows the total shift from the model's baseline prediction.",
+                )
+            with base_col:
+                st.metric(
+                    label="Baseline (Average Prediction)",
+                    value=format_inr(base_value),
+                )
 
             st.write("")
 
@@ -424,8 +504,9 @@ if explain_clicked:
             positive    = [(f, v) for f, v in sorted_shap if v > 0]
             negative    = [(f, v) for f, v in sorted_shap if v < 0]
 
+            st.subheader("📊 What's Driving This Price?")
+
             with st.container(border=True):
-                st.markdown("#### 📊 What's driving this price?")
                 st.caption(
                     f"Starting from a baseline of **{format_inr(base_value)}** "
                     f"(model's average prediction), these features pushed the "
@@ -450,7 +531,7 @@ if explain_clicked:
 
             # --- SHAP bar chart ---
             st.write("")
-            st.markdown("#### 🔬 Feature Contribution Chart")
+            st.subheader("🔬 Feature Contribution Chart")
             st.caption("Top 8 features by absolute SHAP contribution. "
                        "Green = raised the price, Red = lowered the price.")
             fig = draw_shap_chart(shap_vals, top_n=8)
@@ -464,7 +545,9 @@ if explain_clicked:
 # FOOTER
 # --------------------------------------------------------------------------- #
 st.markdown("<br>", unsafe_allow_html=True)
+st.divider()
 st.caption(
     "⚠️ Predictions are estimates based on historical data "
-    "and may not reflect actual market prices."
+    "and may not reflect actual market prices. "
+    "This tool is intended for informational purposes only."
 )
