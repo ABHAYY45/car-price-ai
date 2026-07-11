@@ -38,6 +38,7 @@ from typing import Any
 import joblib
 import numpy as np
 import pandas as pd
+import requests  # <-- NEW: needed to download the model file
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field, field_validator
 
@@ -61,6 +62,16 @@ log = logging.getLogger(__name__)
 # CONFIG
 # --------------------------------------------------------------------------- #
 MODEL_PATH = "models/car_price_model.pkl"
+
+# <-- NEW: URL to download the model from at startup, since the .pkl file
+# (~101 MB) exceeds GitHub's 100 MB file limit and can't be committed.
+# Set this as an environment variable on Render (Environment tab) named
+# MODEL_URL, rather than hardcoding it here — keeps it easy to rotate
+# without a code change/redeploy.
+MODEL_URL = os.environ.get(
+    "MODEL_URL",
+    "PASTE_YOUR_HUGGINGFACE_URL_HERE",  # fallback for local dev if you don't set the env var
+)
 
 # FEATURE_COLUMNS defines every column the model expects, in the exact order
 # it was trained on.  This is the single source of truth for build_input_dataframe().
@@ -188,11 +199,55 @@ class ModelStore:
 
 
 # --------------------------------------------------------------------------- #
+# MODEL DOWNLOAD  (<-- NEW SECTION)
+# --------------------------------------------------------------------------- #
+def download_model():
+    """
+    Download the trained model file from MODEL_URL if it isn't already
+    present locally. The .pkl file (~101 MB) is too large for GitHub
+    (100 MB per-file limit), so it's hosted externally (Hugging Face)
+    and pulled down once at container startup instead.
+    """
+    os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
+
+    if os.path.exists(MODEL_PATH):
+        log.info(f"Model already present at '{MODEL_PATH}', skipping download.")
+        return
+
+    if not MODEL_URL or MODEL_URL == "PASTE_YOUR_HUGGINGFACE_URL_HERE":
+        log.error("MODEL_URL is not set. Set it as an environment variable on Render.")
+        raise RuntimeError(
+            "MODEL_URL environment variable is missing or unset — "
+            "cannot download model file."
+        )
+
+    log.info(f"Downloading model from {MODEL_URL} ...")
+    try:
+        response = requests.get(MODEL_URL, stream=True, timeout=120)
+        response.raise_for_status()  # raises on 404 / bad URL instead of saving an HTML error page
+
+        tmp_path = MODEL_PATH + ".part"
+        with open(tmp_path, "wb") as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+        os.rename(tmp_path, MODEL_PATH)  # atomic — avoids partially-written file being "found" on crash/retry
+
+        size_mb = os.path.getsize(MODEL_PATH) / 1e6
+        log.info(f"Model downloaded ✅ ({size_mb:.1f} MB) -> '{MODEL_PATH}'")
+
+    except requests.exceptions.RequestException as e:
+        log.error(f"Model download failed: {e}")
+        raise RuntimeError(f"Failed to download model from {MODEL_URL}: {e}")
+
+
+# --------------------------------------------------------------------------- #
 # APP LIFECYCLE
 # --------------------------------------------------------------------------- #
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # --- Startup ---
+    download_model()  # <-- NEW: fetch the model before trying to load it
+
     if not os.path.exists(MODEL_PATH):
         log.error(f"Model file not found: '{MODEL_PATH}'")
         log.error("Run 'python src/train_model.py' first.")
