@@ -38,8 +38,9 @@ from typing import Any
 import joblib
 import numpy as np
 import pandas as pd
-import requests  # <-- NEW: needed to download the model file
+import requests
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware  # <-- NEW: for frontend integration
 from pydantic import BaseModel, Field, field_validator
 
 try:
@@ -63,29 +64,11 @@ log = logging.getLogger(__name__)
 # --------------------------------------------------------------------------- #
 MODEL_PATH = "models/car_price_model.pkl"
 
-# <-- NEW: URL to download the model from at startup, since the .pkl file
-# (~101 MB) exceeds GitHub's 100 MB file limit and can't be committed.
-# Set this as an environment variable on Render (Environment tab) named
-# MODEL_URL, rather than hardcoding it here — keeps it easy to rotate
-# without a code change/redeploy.
 MODEL_URL = os.environ.get(
     "MODEL_URL",
-    "PASTE_YOUR_HUGGINGFACE_URL_HERE",  # fallback for local dev if you don't set the env var
+    "PASTE_YOUR_HUGGINGFACE_URL_HERE",
 )
 
-# FEATURE_COLUMNS defines every column the model expects, in the exact order
-# it was trained on.  This is the single source of truth for build_input_dataframe().
-#
-# HOW THIS LIST WAS GENERATED (run after any retraining):
-#   python3 -c "import joblib; m=joblib.load('models/car_price_model.pkl'); print(list(m.feature_names_in_))"
-#
-# WHY fuel_type_lpg IS HERE:
-#   pd.get_dummies(drop_first=True) on the training dataset produced four
-#   fuel_type dummies because the dataset contained five fuel categories
-#   (CNG, Diesel, Electric, LPG, Petrol). CNG is dropped as the baseline.
-#   fuel_type_lpg MUST be present even when the user selects a non-LPG fuel
-#   — in that case its value is 0, but the column must exist in the DataFrame
-#   or the model raises "Feature names seen at fit time, yet now missing".
 FEATURE_COLUMNS = [
     "vehicle_age",
     "km_driven",
@@ -98,7 +81,7 @@ FEATURE_COLUMNS = [
     "log_km_driven",
     "fuel_type_diesel",
     "fuel_type_electric",
-    "fuel_type_lpg",          # ← required; = 0 for all non-LPG fuels
+    "fuel_type_lpg",
     "fuel_type_petrol",
     "seller_type_individual",
     "seller_type_trustmark_dealer",
@@ -132,11 +115,6 @@ class TransmissionType(str, Enum):
 # INPUT SCHEMA
 # --------------------------------------------------------------------------- #
 class CarInput(BaseModel):
-    """
-    Raw user-facing input. Pydantic validates every field before any
-    preprocessing runs. Categoricals are human-readable strings; one-hot
-    encoding happens server-side in preprocess().
-    """
     vehicle_age:       int   = Field(..., ge=0,   le=50,        description="Age of car in years")
     km_driven:         int   = Field(..., ge=0,   le=1_000_000, description="Total kilometres driven")
     mileage:           float = Field(..., gt=0,   le=60.0,      description="Fuel efficiency in km/l")
@@ -150,11 +128,6 @@ class CarInput(BaseModel):
     @field_validator("max_power")
     @classmethod
     def power_must_be_sensible(cls, v: float, info: Any) -> float:
-        """
-        Catch impossible power-to-engine ratios early.
-        No production car exceeds ~0.25 bhp/CC naturally aspirated;
-        we allow up to 0.5 to cover high-performance / modified cars.
-        """
         engine = (info.data or {}).get("engine")
         if engine and engine > 0 and v / engine > 0.5:
             raise ValueError(
@@ -191,23 +164,16 @@ class PredictionOutput(BaseModel):
 # MODEL STORE
 # --------------------------------------------------------------------------- #
 class ModelStore:
-    """Holds the loaded model, explainer, and feature columns (all loaded once at startup)."""
     model           = None
     feature_columns = []
-    explainer       = None   # shap.TreeExplainer, initialized once at startup
-    shap_base_value = None   # scalar expected value (model's average prediction)
+    explainer       = None
+    shap_base_value = None
 
 
 # --------------------------------------------------------------------------- #
-# MODEL DOWNLOAD  (<-- NEW SECTION)
+# MODEL DOWNLOAD
 # --------------------------------------------------------------------------- #
 def download_model():
-    """
-    Download the trained model file from MODEL_URL if it isn't already
-    present locally. The .pkl file (~101 MB) is too large for GitHub
-    (100 MB per-file limit), so it's hosted externally (Hugging Face)
-    and pulled down once at container startup instead.
-    """
     os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
 
     if os.path.exists(MODEL_PATH):
@@ -224,13 +190,13 @@ def download_model():
     log.info(f"Downloading model from {MODEL_URL} ...")
     try:
         response = requests.get(MODEL_URL, stream=True, timeout=120)
-        response.raise_for_status()  # raises on 404 / bad URL instead of saving an HTML error page
+        response.raise_for_status()
 
         tmp_path = MODEL_PATH + ".part"
         with open(tmp_path, "wb") as f:
             for chunk in response.iter_content(chunk_size=8192):
                 f.write(chunk)
-        os.rename(tmp_path, MODEL_PATH)  # atomic — avoids partially-written file being "found" on crash/retry
+        os.rename(tmp_path, MODEL_PATH)
 
         size_mb = os.path.getsize(MODEL_PATH) / 1e6
         log.info(f"Model downloaded ✅ ({size_mb:.1f} MB) -> '{MODEL_PATH}'")
@@ -246,7 +212,7 @@ def download_model():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # --- Startup ---
-    download_model()  # <-- NEW: fetch the model before trying to load it
+    download_model()
 
     if not os.path.exists(MODEL_PATH):
         log.error(f"Model file not found: '{MODEL_PATH}'")
@@ -260,12 +226,10 @@ async def lifespan(app: FastAPI):
     log.info(f"Model type        : {type(ModelStore.model).__name__}")
     log.info(f"Features expected : {len(ModelStore.feature_columns)}")
 
-    # Validate that the hardcoded FEATURE_COLUMNS constant matches the model.
-    # A mismatch means the model was retrained and FEATURE_COLUMNS was not updated.
     model_cols  = set(ModelStore.feature_columns)
     static_cols = set(FEATURE_COLUMNS)
-    missing_from_static = model_cols  - static_cols   # in model, not in our list
-    extra_in_static     = static_cols - model_cols    # in our list, not in model
+    missing_from_static = model_cols  - static_cols
+    extra_in_static     = static_cols - model_cols
 
     if missing_from_static:
         log.error("FEATURE_COLUMNS is missing columns the model expects:")
@@ -284,26 +248,15 @@ async def lifespan(app: FastAPI):
     log.info("FEATURE_COLUMNS validated against model — no missing columns.")
     log.info(f"Active columns: {ModelStore.feature_columns}")
 
-    # --- Initialize SHAP explainer once (reused across all requests) ---
     if SHAP_AVAILABLE:
         try:
-            # TreeExplainer is exact and fast for tree-based models
-            # (RandomForest, XGBoost, LightGBM, CatBoost, ExtraTrees).
-            # It computes SHAP values analytically without sampling,
-            # making it safe to call per-request without performance risk.
             ModelStore.explainer = shap.TreeExplainer(ModelStore.model)
-
-            # expected_value is the model's average prediction across training
-            # data (the baseline before any feature contributions are added).
-            # For regression it is a scalar or a 1-element array — normalize to float.
             ev = ModelStore.explainer.expected_value
             ModelStore.shap_base_value = float(ev[0] if hasattr(ev, "__len__") else ev)
 
             log.info(f"SHAP TreeExplainer initialized. "
                      f"Base value (expected prediction): {ModelStore.shap_base_value:,.0f}")
         except Exception as e:
-            # Non-tree models (e.g. LinearRegression) are not supported by
-            # TreeExplainer. Log clearly — /predict still works fine.
             log.warning(f"SHAP TreeExplainer could not be initialized: {e}")
             log.warning("/predict-with-explanation will return 503 for this model type.")
             ModelStore.explainer = None
@@ -333,19 +286,24 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# <-- NEW: CORS middleware — allows your Streamlit frontend (a different
+# domain) to call this API from the browser. Without this, browser requests
+# from the frontend to /predict will be blocked silently by CORS policy.
+# allow_origins=["*"] is fine for now during testing; once your Streamlit
+# app has a fixed URL, replace "*" with that exact URL to lock it down.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 # --------------------------------------------------------------------------- #
 # PREPROCESSING  (must mirror data_preprocessing.py exactly)
 # --------------------------------------------------------------------------- #
 def engineer_features(data: dict) -> dict:
-    """
-    Compute the three derived features added during training.
-    Formulas MUST match data_preprocessing.py add_features() exactly.
-
-        km_per_year     = km_driven / (vehicle_age + 1)
-        power_to_engine = max_power / engine
-        log_km_driven   = log(1 + km_driven)   [log1p, safe at km=0]
-    """
     data["km_per_year"]     = data["km_driven"] / (data["vehicle_age"] + 1)
     data["power_to_engine"] = data["max_power"]  / data["engine"]
     data["log_km_driven"]   = math.log1p(data["km_driven"])
@@ -353,52 +311,24 @@ def engineer_features(data: dict) -> dict:
 
 
 def encode_categoricals(data: dict) -> dict:
-    """
-    One-hot encode the three string categoricals.
-    Mirrors pd.get_dummies(drop_first=True) from data_preprocessing.py.
-
-    Baselines (dropped category -> all dummies = 0):
-        fuel_type         : CNG          (alphabetically first)
-        seller_type       : Dealer       (alphabetically first)
-        transmission_type : Automatic    (alphabetically first)
-
-    When user sends the baseline value (e.g. fuel_type="CNG"), all
-    fuel_type_* columns correctly stay 0.
-    """
     fuel         = data.pop("fuel_type").lower()
     seller       = data.pop("seller_type").lower().replace(" ", "_")
     transmission = data.pop("transmission_type").lower().replace(" ", "_")
 
-    # fuel_type dummies  (baseline = CNG)
     data["fuel_type_diesel"]   = 1 if fuel == "diesel"   else 0
     data["fuel_type_electric"] = 1 if fuel == "electric" else 0
     data["fuel_type_lpg"]      = 1 if fuel == "lpg"      else 0
     data["fuel_type_petrol"]   = 1 if fuel == "petrol"   else 0
 
-    # seller_type dummies  (baseline = Dealer)
     data["seller_type_individual"]       = 1 if seller == "individual"       else 0
     data["seller_type_trustmark_dealer"] = 1 if seller == "trustmark_dealer" else 0
 
-    # transmission_type dummies  (baseline = Automatic)
     data["transmission_type_manual"] = 1 if transmission == "manual" else 0
 
     return data
 
 
 def build_input_dataframe(data: dict) -> pd.DataFrame:
-    """
-    Assemble the final single-row DataFrame in the exact column order
-    the model was trained on.
-
-    Steps:
-        1. Start with all FEATURE_COLUMNS initialised to 0.
-        2. Overwrite with preprocessed values.
-        3. Reindex to FEATURE_COLUMNS to enforce exact order.
-
-    Reindex is the critical safety net: even if preprocessing produces
-    extra or differently-named keys, the model always sees exactly the
-    columns it was trained on, in the right order.
-    """
     feature_columns = ModelStore.feature_columns
     row = {col: 0 for col in feature_columns}
     for col, value in data.items():
@@ -408,14 +338,6 @@ def build_input_dataframe(data: dict) -> pd.DataFrame:
 
 
 def preprocess(raw: CarInput) -> pd.DataFrame:
-    """
-    Full preprocessing pipeline for a single API request:
-        Pydantic model
-            -> plain dict
-            -> add engineered features
-            -> one-hot encode categoricals
-            -> build aligned DataFrame
-    """
     data = raw.model_dump()
     data = engineer_features(data)
     data = encode_categoricals(data)
@@ -428,13 +350,11 @@ def preprocess(raw: CarInput) -> pd.DataFrame:
 # --------------------------------------------------------------------------- #
 @app.get("/", tags=["Health"])
 def root():
-    """Health check — confirms the API is running. Used by Render for health checks."""
     return {"status": "ok", "message": "API is running"}
 
 
 @app.get("/health", tags=["Health"])
 def health():
-    """Detailed health check — confirms the model is loaded and ready."""
     if ModelStore.model is None:
         raise HTTPException(status_code=503, detail="Model is not loaded.")
     return {
@@ -446,13 +366,6 @@ def health():
 
 @app.post("/predict", response_model=PredictionOutput, tags=["Prediction"])
 def predict(car: CarInput):
-    """
-    Predict the selling price of a used car.
-
-    - Accepts raw human-readable inputs.
-    - Handles all feature engineering and one-hot encoding server-side.
-    - Returns predicted price in INR.
-    """
     if ModelStore.model is None:
         raise HTTPException(status_code=503, detail="Model is not loaded.")
 
@@ -486,22 +399,6 @@ class ExplanationOutput(BaseModel):
 
 @app.post("/predict-with-explanation", response_model=ExplanationOutput, tags=["Explanation"])
 def predict_with_explanation(car: CarInput):
-    """
-    Predict the selling price AND return a SHAP explanation.
-
-    Response includes:
-        predicted_price : the model's price estimate (INR)
-        base_value      : the model's average prediction across training data.
-                          This is the starting point before any feature
-                          contributions push the prediction up or down.
-        shap_values     : dict mapping each feature name to its contribution.
-                          Positive  -> pushed the price UP from base_value.
-                          Negative  -> pushed the price DOWN from base_value.
-                          Sum check : base_value + sum(shap_values) ≈ predicted_price
-
-    Requires a tree-based model (RandomForest, XGBoost, etc.).
-    Returns 503 if SHAP is unavailable or the model type is unsupported.
-    """
     if ModelStore.model is None:
         raise HTTPException(status_code=503, detail="Model is not loaded.")
 
@@ -518,18 +415,11 @@ def predict_with_explanation(car: CarInput):
     try:
         input_df = preprocess(car)
 
-        # --- Predict ---
         price = float(round(ModelStore.model.predict(input_df)[0], 2))
 
-        # --- SHAP values ---
-        # shap_values returns shape (1, n_features) for single-row regression.
-        # We flatten to a 1-D array of length n_features.
         raw_shap = ModelStore.explainer.shap_values(input_df)
-        sv_array = np.array(raw_shap).flatten()   # (16,) — one value per feature
+        sv_array = np.array(raw_shap).flatten()
 
-        # Build feature -> contribution dict.
-        # All values are cast to plain Python float for JSON serialisation
-        # (numpy.float32/64 is not JSON-serialisable by default).
         feature_names = ModelStore.feature_columns
         shap_dict = {
             feature_names[i]: round(float(sv_array[i]), 4)
