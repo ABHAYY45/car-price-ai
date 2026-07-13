@@ -40,7 +40,8 @@ import numpy as np
 import pandas as pd
 import requests
 from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware  # <-- NEW: for frontend integration
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware  # <-- NEW: response compression
 from pydantic import BaseModel, Field, field_validator
 
 try:
@@ -286,11 +287,9 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# <-- NEW: CORS middleware — allows your Streamlit frontend (a different
-# domain) to call this API from the browser. Without this, browser requests
-# from the frontend to /predict will be blocked silently by CORS policy.
-# allow_origins=["*"] is fine for now during testing; once your Streamlit
-# app has a fixed URL, replace "*" with that exact URL to lock it down.
+# CORS — allows your Streamlit frontend (a different domain) to call this
+# API from the browser. allow_origins=["*"] is fine for now during testing;
+# once your Streamlit app has a fixed URL, replace "*" with that exact URL.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -298,6 +297,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# <-- NEW: GZip compression — shrinks response bodies over 1KB before
+# sending them over the wire. Mainly benefits /predict-with-explanation,
+# which returns 16 SHAP feature values per request; browsers/HTTP clients
+# decompress automatically, so no changes needed on the frontend side.
+app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 
 # --------------------------------------------------------------------------- #
