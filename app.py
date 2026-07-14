@@ -31,6 +31,7 @@ Expected response:
 import logging
 import math
 import os
+import time
 from contextlib import asynccontextmanager
 from enum import Enum
 from typing import Any
@@ -41,8 +42,9 @@ import pandas as pd
 import requests
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.middleware.gzip import GZipMiddleware  # <-- NEW: response compression
+from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field, field_validator
+from starlette.middleware.base import BaseHTTPMiddleware  # <-- NEW: for request timing
 
 try:
     import shap
@@ -172,6 +174,24 @@ class ModelStore:
 
 
 # --------------------------------------------------------------------------- #
+# REQUEST TIMING MIDDLEWARE  (<-- NEW SECTION)
+# --------------------------------------------------------------------------- #
+class TimingMiddleware(BaseHTTPMiddleware):
+    """
+    Logs how long each request took, and adds an X-Process-Time response
+    header (in milliseconds). Helps spot slow predictions or SHAP
+    explanation calls without needing external monitoring tools.
+    """
+    async def dispatch(self, request, call_next):
+        start = time.perf_counter()
+        response = await call_next(request)
+        duration_ms = (time.perf_counter() - start) * 1000
+        response.headers["X-Process-Time"] = f"{duration_ms:.2f}ms"
+        log.info(f"{request.method} {request.url.path} completed in {duration_ms:.2f}ms")
+        return response
+
+
+# --------------------------------------------------------------------------- #
 # MODEL DOWNLOAD
 # --------------------------------------------------------------------------- #
 def download_model():
@@ -298,11 +318,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# <-- NEW: GZip compression — shrinks response bodies over 1KB before
-# sending them over the wire. Mainly benefits /predict-with-explanation,
-# which returns 16 SHAP feature values per request; browsers/HTTP clients
-# decompress automatically, so no changes needed on the frontend side.
+# GZip compression — shrinks response bodies over 1KB before sending them
+# over the wire. Mainly benefits /predict-with-explanation, which returns
+# 16 SHAP feature values per request.
 app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+# <-- NEW: Request timing — logs latency for every request and adds an
+# X-Process-Time response header. Useful for spotting slow predictions
+# once the app is live, without needing external monitoring tools.
+app.add_middleware(TimingMiddleware)
 
 
 # --------------------------------------------------------------------------- #
