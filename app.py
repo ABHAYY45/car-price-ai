@@ -44,7 +44,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field, field_validator
-from starlette.middleware.base import BaseHTTPMiddleware  # <-- NEW: for request timing
+from starlette.middleware.base import BaseHTTPMiddleware
 
 try:
     import shap
@@ -174,7 +174,7 @@ class ModelStore:
 
 
 # --------------------------------------------------------------------------- #
-# REQUEST TIMING MIDDLEWARE  (<-- NEW SECTION)
+# REQUEST TIMING MIDDLEWARE
 # --------------------------------------------------------------------------- #
 class TimingMiddleware(BaseHTTPMiddleware):
     """
@@ -323,9 +323,8 @@ app.add_middleware(
 # 16 SHAP feature values per request.
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
-# <-- NEW: Request timing — logs latency for every request and adds an
-# X-Process-Time response header. Useful for spotting slow predictions
-# once the app is live, without needing external monitoring tools.
+# Request timing — logs latency for every request and adds an
+# X-Process-Time response header.
 app.add_middleware(TimingMiddleware)
 
 
@@ -390,6 +389,30 @@ def health():
         "status":   "ok",
         "model":    type(ModelStore.model).__name__,
         "features": len(ModelStore.feature_columns),
+    }
+
+
+@app.get("/model-info", tags=["Health"])
+def model_info():
+    """
+    Returns metadata about the currently loaded model — useful for the
+    frontend to introspect what features are expected, or to confirm
+    whether SHAP explanations are available, without hardcoding this
+    info separately on the client side.
+    """
+    if ModelStore.model is None:
+        raise HTTPException(status_code=503, detail="Model is not loaded.")
+
+    return {
+        "model_type": type(ModelStore.model).__name__,
+        "feature_count": len(ModelStore.feature_columns),
+        "feature_columns": ModelStore.feature_columns,
+        "explanation_available": ModelStore.explainer is not None,
+        "categorical_options": {
+            "fuel_type": [e.value for e in FuelType],
+            "seller_type": [e.value for e in SellerType],
+            "transmission_type": [e.value for e in TransmissionType],
+        },
     }
 
 
