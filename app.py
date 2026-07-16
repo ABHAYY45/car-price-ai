@@ -441,6 +441,45 @@ def predict(car: CarInput):
 
 
 # --------------------------------------------------------------------------- #
+# BATCH PREDICTION SCHEMA + ENDPOINT
+# --------------------------------------------------------------------------- #
+class BatchCarInput(BaseModel):
+    cars: list[CarInput] = Field(..., min_length=1, max_length=50, description="List of cars to price")
+
+
+class BatchPredictionOutput(BaseModel):
+    predictions: list[PredictionOutput]
+
+
+@app.post("/predict-batch", response_model=BatchPredictionOutput, tags=["Prediction"])
+def predict_batch(batch: BatchCarInput):
+    """
+    Predict selling prices for multiple cars in a single request.
+    Capped at 50 cars per request to keep response times reasonable
+    and avoid excessive memory use on Render's free tier.
+    """
+    if ModelStore.model is None:
+        raise HTTPException(status_code=503, detail="Model is not loaded.")
+
+    try:
+        results = []
+        for car in batch.cars:
+            input_df = preprocess(car)
+            prediction = ModelStore.model.predict(input_df)
+            price = float(round(prediction[0], 2))
+            results.append(PredictionOutput(predicted_price=price))
+
+        log.info(f"Batch prediction | {len(results)} cars processed")
+        return BatchPredictionOutput(predictions=results)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error(f"Batch prediction failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Batch prediction failed: {str(e)}")
+
+
+# --------------------------------------------------------------------------- #
 # EXPLANATION SCHEMA + ENDPOINT
 # --------------------------------------------------------------------------- #
 class ExplanationOutput(BaseModel):
