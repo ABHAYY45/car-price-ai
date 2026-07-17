@@ -416,6 +416,52 @@ def model_info():
     }
 
 
+@app.get("/feature-importance", tags=["Explanation"])
+def feature_importance():
+    """
+    Returns the model's global feature importances — how much each
+    feature matters across ALL predictions, not just one specific car.
+
+    Different from /predict-with-explanation (SHAP), which explains a
+    single prediction. This endpoint answers "what drives car prices
+    in general?" rather than "why did THIS car get THIS price?".
+
+    Only available for tree-based models exposing feature_importances_
+    (RandomForest, XGBoost, etc.) — returns 501 otherwise.
+    """
+    if ModelStore.model is None:
+        raise HTTPException(status_code=503, detail="Model is not loaded.")
+
+    if not hasattr(ModelStore.model, "feature_importances_"):
+        raise HTTPException(
+            status_code=501,
+            detail=(
+                f"{type(ModelStore.model).__name__} does not expose "
+                "feature_importances_. This endpoint requires a "
+                "tree-based model (RandomForest, XGBoost, etc.)."
+            ),
+        )
+
+    importances = ModelStore.model.feature_importances_
+    feature_names = ModelStore.feature_columns
+
+    importance_dict = {
+        feature_names[i]: round(float(importances[i]), 4)
+        for i in range(len(feature_names))
+    }
+
+    # Sort descending — most important feature first, easiest for a
+    # frontend bar chart to consume directly without re-sorting.
+    sorted_importance = dict(
+        sorted(importance_dict.items(), key=lambda item: item[1], reverse=True)
+    )
+
+    return {
+        "model_type": type(ModelStore.model).__name__,
+        "feature_importance": sorted_importance,
+    }
+
+
 @app.post("/predict", response_model=PredictionOutput, tags=["Prediction"])
 def predict(car: CarInput):
     if ModelStore.model is None:
