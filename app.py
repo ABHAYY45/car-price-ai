@@ -526,6 +526,81 @@ def predict_batch(batch: BatchCarInput):
 
 
 # --------------------------------------------------------------------------- #
+# CONFIDENCE SCHEMA + ENDPOINT
+# --------------------------------------------------------------------------- #
+class ConfidenceOutput(BaseModel):
+    predicted_price: float = Field(..., description="Estimated selling price in INR (mean across trees)")
+    lower_bound:     float = Field(..., description="Lower bound of the 90% confidence interval")
+    upper_bound:     float = Field(..., description="Upper bound of the 90% confidence interval")
+    std_dev:         float = Field(..., description="Standard deviation across individual tree predictions")
+
+
+@app.post("/predict-with-confidence", response_model=ConfidenceOutput, tags=["Prediction"])
+def predict_with_confidence(car: CarInput):
+    """
+    Predict the selling price along with a confidence interval, using
+    the spread of predictions across the individual trees in the
+    RandomForest (rather than just their average).
+
+    A tight interval means the trees mostly agree — a confident
+    prediction. A wide interval means the trees disagree a lot — the
+    model is essentially guessing for that input, which is useful to
+    surface rather than hide behind a single number.
+
+    Only available for ensemble models exposing estimators_
+    (RandomForest, ExtraTrees, etc.) — returns 501 otherwise.
+    """
+    if ModelStore.model is None:
+        raise HTTPException(status_code=503, detail="Model is not loaded.")
+
+    if not hasattr(ModelStore.model, "estimators_"):
+        raise HTTPException(
+            status_code=501,
+            detail=(
+                f"{type(ModelStore.model).__name__} does not expose "
+                "estimators_. This endpoint requires an ensemble model "
+                "(RandomForest, ExtraTrees, etc.)."
+            ),
+        )
+
+    try:
+        input_df = preprocess(car)
+
+        # Collect one prediction per tree in the forest instead of just
+        # the ensemble's averaged output.
+        tree_predictions = np.array([
+            tree.predict(input_df)[0] for tree in ModelStore.model.estimators_
+        ])
+
+        mean_price = float(round(tree_predictions.mean(), 2))
+        std_dev    = float(round(tree_predictions.std(), 2))
+
+        # 90% interval via the 5th/95th percentile across tree predictions —
+        # robust to outlier trees, doesn't assume a normal distribution.
+        lower_bound = float(round(np.percentile(tree_predictions, 5), 2))
+        upper_bound = float(round(np.percentile(tree_predictions, 95), 2))
+
+        log.info(
+            f"Confidence | price=₹{mean_price:,.0f} | "
+            f"range=[₹{lower_bound:,.0f}, ₹{upper_bound:,.0f}] | "
+            f"std=₹{std_dev:,.0f}"
+        )
+
+        return ConfidenceOutput(
+            predicted_price = mean_price,
+            lower_bound     = lower_bound,
+            upper_bound     = upper_bound,
+            std_dev         = std_dev,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error(f"Confidence prediction failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Confidence prediction failed: {str(e)}")
+
+
+# --------------------------------------------------------------------------- #
 # EXPLANATION SCHEMA + ENDPOINT
 # --------------------------------------------------------------------------- #
 class ExplanationOutput(BaseModel):
