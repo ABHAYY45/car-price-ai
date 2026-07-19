@@ -40,9 +40,11 @@ import joblib
 import numpy as np
 import pandas as pd
 import requests
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 from starlette.middleware.base import BaseHTTPMiddleware
 
@@ -326,6 +328,33 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 # Request timing — logs latency for every request and adds an
 # X-Process-Time response header.
 app.add_middleware(TimingMiddleware)
+
+
+# --------------------------------------------------------------------------- #
+# VALIDATION ERROR HANDLER
+# --------------------------------------------------------------------------- #
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """
+    Overrides FastAPI's default 422 response with a flatter, easier to
+    read structure. The default format nests errors in a way that's
+    annoying to parse on the frontend just to show "seats must be
+    between 2 and 10" — this collapses each error down to a single
+    field + message pair instead.
+    """
+    errors = []
+    for err in exc.errors():
+        # err["loc"] looks like ("body", "seats") — drop the leading
+        # "body"/"query" marker and keep just the field name.
+        field = ".".join(str(part) for part in err["loc"] if part != "body")
+        errors.append({"field": field, "message": err["msg"]})
+
+    log.warning(f"Validation failed on {request.url.path}: {errors}")
+
+    return JSONResponse(
+        status_code=422,
+        content={"detail": "Validation failed", "errors": errors},
+    )
 
 
 # --------------------------------------------------------------------------- #
