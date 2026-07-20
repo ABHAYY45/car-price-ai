@@ -357,6 +357,25 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     )
 
 
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """
+    Catches anything not already handled by a specific try/except inside
+    an endpoint (e.g. an unexpected error in middleware, or an edge case
+    nobody anticipated). Without this, an uncaught exception would either
+    crash the worker or leak a raw Python traceback — including file
+    paths and internals — straight back to whoever called the API.
+
+    The full traceback is still logged server-side via exc_info=True,
+    so nothing is lost for debugging; the client just never sees it.
+    """
+    log.error(f"Unhandled exception on {request.url.path}: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "An unexpected error occurred. Please try again."},
+    )
+
+
 # --------------------------------------------------------------------------- #
 # PREPROCESSING  (must mirror data_preprocessing.py exactly)
 # --------------------------------------------------------------------------- #
