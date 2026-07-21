@@ -194,6 +194,60 @@ class TimingMiddleware(BaseHTTPMiddleware):
 
 
 # --------------------------------------------------------------------------- #
+# RATE LIMITING MIDDLEWARE
+# --------------------------------------------------------------------------- #
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    """
+    Simple in-memory sliding-window rate limiter, keyed by client IP.
+    Caps each IP to `max_requests` per `window_seconds`.
+
+    In-memory storage is fine here because Render is configured with
+    WEB_CONCURRENCY=1 (single worker) — if this app ever scales to
+    multiple workers/instances, this would need a shared store like
+    Redis instead, since each worker would otherwise track its own
+    separate counts.
+
+    Health check endpoints are exempted so uptime monitors (or Render's
+    own health checks) never get throttled.
+    """
+    EXEMPT_PATHS = {"/", "/health"}
+
+    def __init__(self, app, max_requests: int = 30, window_seconds: int = 60):
+        super().__init__(app)
+        self.max_requests = max_requests
+        self.window_seconds = window_seconds
+        self.requests: dict[str, list[float]] = {}
+
+    async def dispatch(self, request, call_next):
+        if request.url.path in self.EXEMPT_PATHS:
+            return await call_next(request)
+
+        client_ip = request.client.host if request.client else "unknown"
+        now = time.time()
+
+        timestamps = self.requests.get(client_ip, [])
+        # Drop timestamps outside the current window before counting.
+        timestamps = [t for t in timestamps if now - t < self.window_seconds]
+
+        if len(timestamps) >= self.max_requests:
+            log.warning(f"Rate limit exceeded for {client_ip} on {request.url.path}")
+            return JSONResponse(
+                status_code=429,
+                content={
+                    "detail": (
+                        f"Rate limit exceeded: max {self.max_requests} requests "
+                        f"per {self.window_seconds} seconds. Please slow down."
+                    )
+                },
+            )
+
+        timestamps.append(now)
+        self.requests[client_ip] = timestamps
+
+        return await call_next(request)
+
+
+# --------------------------------------------------------------------------- #
 # MODEL DOWNLOAD
 # --------------------------------------------------------------------------- #
 def download_model():
@@ -328,6 +382,11 @@ app.add_middleware(GZipMiddleware, minimum_size=1000)
 # Request timing — logs latency for every request and adds an
 # X-Process-Time response header.
 app.add_middleware(TimingMiddleware)
+
+# Rate limiting — caps each client IP to 30 requests per 60 seconds,
+# to protect the free-tier instance from being overwhelmed by a single
+# aggressive caller. Health check paths are exempted.
+app.add_middleware(RateLimitMiddleware, max_requests=30, window_seconds=60)
 
 
 # --------------------------------------------------------------------------- #
