@@ -176,6 +176,29 @@ class ModelStore:
 
 
 # --------------------------------------------------------------------------- #
+# USAGE STATS TRACKER
+# --------------------------------------------------------------------------- #
+class StatsTracker:
+    """
+    In-memory counters for basic usage observability — how many times
+    each endpoint has been hit since the server last started, and how
+    long it's been running. Resets on every restart/redeploy, which is
+    fine for a lightweight "is anyone using this?" check; not meant to
+    replace real metrics tooling if this ever needs long-term tracking.
+    """
+    start_time: float = time.time()
+    endpoint_counts: dict[str, int] = {}
+
+    @classmethod
+    def record(cls, path: str):
+        cls.endpoint_counts[path] = cls.endpoint_counts.get(path, 0) + 1
+
+    @classmethod
+    def uptime_seconds(cls) -> float:
+        return round(time.time() - cls.start_time, 1)
+
+
+# --------------------------------------------------------------------------- #
 # REQUEST TIMING MIDDLEWARE
 # --------------------------------------------------------------------------- #
 class TimingMiddleware(BaseHTTPMiddleware):
@@ -190,6 +213,7 @@ class TimingMiddleware(BaseHTTPMiddleware):
         duration_ms = (time.perf_counter() - start) * 1000
         response.headers["X-Process-Time"] = f"{duration_ms:.2f}ms"
         log.info(f"{request.method} {request.url.path} completed in {duration_ms:.2f}ms")
+        StatsTracker.record(request.url.path)
         return response
 
 
@@ -520,6 +544,27 @@ def model_info():
             "seller_type": [e.value for e in SellerType],
             "transmission_type": [e.value for e in TransmissionType],
         },
+    }
+
+
+@app.get("/stats", tags=["Health"])
+def stats():
+    """
+    Basic usage stats since this server instance last started — total
+    requests per endpoint, and uptime. Resets on every restart/redeploy.
+    Useful as a quick "is anyone using this API?" check without digging
+    through raw logs.
+    """
+    total_requests = sum(StatsTracker.endpoint_counts.values())
+    uptime = StatsTracker.uptime_seconds()
+
+    return {
+        "uptime_seconds": uptime,
+        "uptime_human": f"{int(uptime // 3600)}h {int((uptime % 3600) // 60)}m {int(uptime % 60)}s",
+        "total_requests": total_requests,
+        "requests_by_endpoint": dict(
+            sorted(StatsTracker.endpoint_counts.items(), key=lambda item: item[1], reverse=True)
+        ),
     }
 
 
