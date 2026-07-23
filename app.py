@@ -34,6 +34,7 @@ import os
 import time
 from contextlib import asynccontextmanager
 from enum import Enum
+from functools import lru_cache
 from typing import Any
 
 import joblib
@@ -505,6 +506,70 @@ def preprocess(raw: CarInput) -> pd.DataFrame:
 
 
 # --------------------------------------------------------------------------- #
+# CACHED PREDICTION
+# --------------------------------------------------------------------------- #
+@lru_cache(maxsize=256)
+def _cached_predict(
+    vehicle_age: int,
+    km_driven: int,
+    mileage: float,
+    engine: int,
+    max_power: float,
+    seats: int,
+    fuel_type: str,
+    seller_type: str,
+    transmission_type: str,
+) -> float:
+    """
+    Caches predictions keyed by the exact car specs. If the same input
+    is submitted again (e.g. someone re-clicking "predict" without
+    changing anything, or duplicate rows in a batch), this skips
+    re-running the model entirely and returns the cached result
+    instantly — no reason to make a RandomForest recompute an answer
+    it already gave.
+
+    Takes plain hashable arguments rather than a CarInput object,
+    since Pydantic models aren't hashable by default and lru_cache
+    needs hashable arguments to use as a cache key.
+
+    maxsize=256 keeps memory bounded on the free-tier instance — once
+    full, the least-recently-used entry is evicted to make room.
+    """
+    car = CarInput(
+        vehicle_age=vehicle_age,
+        km_driven=km_driven,
+        mileage=mileage,
+        engine=engine,
+        max_power=max_power,
+        seats=seats,
+        fuel_type=fuel_type,
+        seller_type=seller_type,
+        transmission_type=transmission_type,
+    )
+    input_df = preprocess(car)
+    prediction = ModelStore.model.predict(input_df)
+    return float(round(prediction[0], 2))
+
+
+def predict_price(car: CarInput) -> float:
+    """
+    Thin wrapper around _cached_predict — unpacks the CarInput model
+    into the plain hashable arguments the cache needs.
+    """
+    return _cached_predict(
+        car.vehicle_age,
+        car.km_driven,
+        car.mileage,
+        car.engine,
+        car.max_power,
+        car.seats,
+        car.fuel_type.value,
+        car.seller_type.value,
+        car.transmission_type.value,
+    )
+
+
+# --------------------------------------------------------------------------- #
 # ENDPOINTS
 # --------------------------------------------------------------------------- #
 @app.get("/", tags=["Health"])
@@ -551,12 +616,13 @@ def model_info():
 def stats():
     """
     Basic usage stats since this server instance last started — total
-    requests per endpoint, and uptime. Resets on every restart/redeploy.
-    Useful as a quick "is anyone using this API?" check without digging
-    through raw logs.
+    requests per endpoint, uptime, and prediction cache hit rate.
+    Resets on every restart/redeploy. Useful as a quick "is anyone
+    using this API?" check without digging through raw logs.
     """
     total_requests = sum(StatsTracker.endpoint_counts.values())
     uptime = StatsTracker.uptime_seconds()
+    cache_info = _cached_predict.cache_info()
 
     return {
         "uptime_seconds": uptime,
@@ -565,6 +631,12 @@ def stats():
         "requests_by_endpoint": dict(
             sorted(StatsTracker.endpoint_counts.items(), key=lambda item: item[1], reverse=True)
         ),
+        "prediction_cache": {
+            "hits": cache_info.hits,
+            "misses": cache_info.misses,
+            "current_size": cache_info.currsize,
+            "max_size": cache_info.maxsize,
+        },
     }
 
 
@@ -620,13 +692,10 @@ def predict(car: CarInput):
         raise HTTPException(status_code=503, detail="Model is not loaded.")
 
     try:
-        input_df = preprocess(car)
-        log.info(f"Predicting | shape={input_df.shape} | "
-                 f"km={car.km_driven} | age={car.vehicle_age} | "
+        log.info(f"Predicting | km={car.km_driven} | age={car.vehicle_age} | "
                  f"fuel={car.fuel_type.value}")
 
-        prediction = ModelStore.model.predict(input_df)
-        price      = float(round(prediction[0], 2))
+        price = predict_price(car)
 
         log.info(f"Predicted price: INR {price:,.0f}")
         return PredictionOutput(predicted_price=price)
@@ -662,9 +731,7 @@ def predict_batch(batch: BatchCarInput):
     try:
         results = []
         for car in batch.cars:
-            input_df = preprocess(car)
-            prediction = ModelStore.model.predict(input_df)
-            price = float(round(prediction[0], 2))
+            price = predict_price(car)
             results.append(PredictionOutput(predicted_price=price))
 
         log.info(f"Batch prediction | {len(results)} cars processed")
